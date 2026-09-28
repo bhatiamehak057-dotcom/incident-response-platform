@@ -14,3 +14,37 @@ def get_service_health(service: str) -> dict:
         "status": "DOWN",
         "message": "Service is experiencing connectivity issues"
     }
+
+@mcp.tool()
+def get_recent_logs(service: str) -> list:
+    """Get recent application logs for a service."""
+
+    return [
+        {
+            "timestamp": "2026-09-28T10:15:21",
+            "level": "ERROR",
+            "message": "Connection timeout to payment provider"
+        },
+        {
+            "timestamp": "2026-09-28T10:15:24",
+            "level": "ERROR",
+            "message": "Payment provider request failed"
+        },
+        {
+            "timestamp": "2026-09-28T10:15:27",
+            "level": "ERROR",
+            "message": "Retry limit exceeded"
+        }
+    ]
+
+
+@mcp.tool()
+def get_metrics(service: str) -> dict:
+    """Get current monitoring metrics for a service."""
+
+    return {
+        "service": service,
+        "errorRate": 98.4,
+        "latencyMs": 4200,
+        "requestsPerMinute": 120
+    }

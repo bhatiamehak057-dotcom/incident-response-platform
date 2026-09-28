@@ -7,6 +7,7 @@ import asyncio
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict
 from mcp import Client, StdioServerParameters
+from rag import initialize_rag, retrieve_runbook
 
 # importing anthropic sdk, This gives our Python application access to Anthropic's API.
 from anthropic import Anthropic
@@ -26,6 +27,8 @@ class IncidentState(TypedDict):
     incident: dict
     analysis: dict
     investigation: dict
+    runbooks: list
+    final_analysis: dict
 
 # creates an Anthropic client.
 # Think of client as our connection/interface to Claude.
@@ -113,15 +116,36 @@ def investigate_incident(state: IncidentState):
 
     async def call_mcp():
         async with Client(server_params) as client:
-            result = await client.call_tool(
+
+            health_result = await client.call_tool(
                 "get_service_health",
                 {"service": incident["service"]}
             )
 
-            if result.is_error:
-                raise RuntimeError(result.content)
+            logs_result = await client.call_tool(
+                "get_recent_logs",
+                {"service": incident["service"]}
+            )
 
-            return json.loads(result.content[0].text)
+            metrics_result = await client.call_tool(
+                "get_metrics",
+                {"service": incident["service"]}
+            )
+
+            if health_result.is_error:
+                raise RuntimeError(health_result.content)
+
+            if logs_result.is_error:
+                raise RuntimeError(logs_result.content)
+
+            if metrics_result.is_error:
+                raise RuntimeError(metrics_result.content)
+
+            return {
+                "health": json.loads(health_result.content[0].text),
+                "logs": json.loads(logs_result.content[0].text),
+                "metrics": json.loads(metrics_result.content[0].text)
+            }
 
     investigation = asyncio.run(call_mcp())
 
@@ -132,15 +156,113 @@ def investigate_incident(state: IncidentState):
     }
 
 
+# Its job is to connect LangGraph → RAG.
+def retrieve_incident_runbook(state: IncidentState):
+
+    incident = state["incident"]
+
+    # gets your MCP results:
+    investigation = state["investigation"]
+
+    # We're combining the information we already know about the incident into one piece of text.
+    # This becomes the RAG search query.
+    query = f"""
+    Service: {incident["service"]}
+    Error: {incident["error"]}
+
+    Investigation:
+    {json.dumps(investigation)}
+    """
+
+    # this line is the actual RAG retrieval
+    # We're calling the function from rag.py
+    runbooks = retrieve_runbook(query)
+
+    print("Relevant runbooks:", runbooks)
+
+    return {
+        "runbooks": runbooks
+    }
+
+
+def analyze_evidence(state: IncidentState):
+    incident = state["incident"]
+    investigation = state["investigation"]
+    runbooks = state["runbooks"]
+
+    prompt = f"""
+Re-analyze this production incident using the investigation evidence.
+
+Incident:
+Service: {incident["service"]}
+Severity: {incident["severity"]}
+Error: {incident["error"]}
+
+Investigation evidence:
+{json.dumps(investigation, indent=2)}
+
+Relevant runbooks:
+{json.dumps(runbooks, indent=2)}
+
+Based on the incident, investigation evidence, and relevant runbooks,
+provide a refined diagnosis.
+
+Important:
+- Clearly distinguish observed evidence from inference.
+- Do not assume that requests are payment transactions unless the evidence explicitly says so.
+- Use the provided metrics exactly as reported.
+- Do not invent facts that are not present in the incident, investigation, or runbooks.
+
+Return your analysis as JSON with exactly these fields:
+
+{{
+  "rootCause": "string",
+  "impact": "string",
+  "recommendedActions": ["string", "string", "string"]
+}}
+"""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=500,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+    )
+
+    analysis_text = (
+        response.content[0].text
+        .replace("```json", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    final_analysis = json.loads(analysis_text)
+
+    print("Evidence-based analysis:", final_analysis)
+
+    return {
+        "final_analysis": final_analysis
+    }
+
+
+initialize_rag()
 # Create a graph whose state follows IncidentState
 graph_builder = StateGraph(IncidentState)
 
 graph_builder.add_node("analyze", analyze_incident)
 graph_builder.add_node("investigate", investigate_incident)
+graph_builder.add_node("retrieve_runbook", retrieve_incident_runbook)
+graph_builder.add_node("analyze_evidence", analyze_evidence)
 
 graph_builder.add_edge(START, "analyze")
 graph_builder.add_edge("analyze", "investigate")
-graph_builder.add_edge("investigate", END)
+graph_builder.add_edge("investigate", "retrieve_runbook")
+graph_builder.add_edge("retrieve_runbook", "analyze_evidence")
+graph_builder.add_edge("analyze_evidence", END)
 
 # turns the graph definition into an executable graph
 graph = graph_builder.compile()
@@ -155,7 +277,63 @@ if __name__ == "__main__":
             "error": "payment provider unavailable"
         },
         "analysis": {},
-        "investigation": {}
+        "investigation": {},
+        "runbooks":[],
+        "final_analysis": {}
     })
 
     print(result)
+
+# Runbook = human-written operational knowledge/instructions.
+# Chroma = stores and searches that knowledge semantically.
+# RAG = retrieves relevant knowledge and gives it to the LLM as context.
+# rag.py = your implementation of the retrieval layer.
+# retrieve_incident_runbook() = the LangGraph node that takes the current incident/evidence and asks the RAG layer for relevant knowledge.
+# Claude = uses the retrieved knowledge + actual MCP evidence to produce the diagnosis.
+
+
+
+#                 INCIDENT
+#                    │
+#                    ▼
+#              LangGraph
+#                    │
+#                    ▼
+#            MCP Investigation
+#                    │
+#         ┌──────────┼──────────┐
+#         │          │          │
+#       health      logs      metrics
+#         │          │          │
+#         └──────────┼──────────┘
+#                    │
+#                    ▼
+#         retrieve_incident_runbook()
+#                    │
+#                    ▼
+#              Create query
+#                    │
+#                    ▼
+#               retrieve_runbook()
+#                    │
+#                    ▼
+#                 Chroma
+#                    │
+#              semantic search
+#                    │
+#                    ▼
+#         ┌─────────────────────┐
+#         │ Relevant Runbooks   │
+#         │                     │
+#         │ Provider Timeout    │
+#         │ Service Down        │
+#         └──────────┬──────────┘
+#                    │
+#                    ▼
+#             LangGraph state
+#                    │
+#                    ▼
+#             Claude + evidence
+#                    │
+#                    ▼
+#           Refined diagnosis
