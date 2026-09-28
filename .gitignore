@@ -1,0 +1,23 @@
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Java / Maven
+target/
+
+# Node
+node_modules/
+dist/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
