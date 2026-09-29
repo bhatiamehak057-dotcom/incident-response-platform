@@ -1,6 +1,7 @@
 package com.example.incidentservice.config;
 
 import com.example.incidentservice.model.Incident;
+import com.example.incidentservice.model.RemediationDecision;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.context.annotation.Bean;
@@ -16,8 +17,8 @@ import java.util.Map;
 @Configuration
 public class KafkaConfig {
 
-    @Bean
-    public ProducerFactory<String, Incident> producerFactory() {
+    private Map<String, Object> producerConfig() {
+
         Map<String, Object> config = new HashMap<>();
 
         config.put(
@@ -35,11 +36,26 @@ public class KafkaConfig {
                 JsonSerializer.class
         );
 
-        return new DefaultKafkaProducerFactory<>(config);
+        return config;
     }
 
     @Bean
-    public KafkaTemplate<String, Incident> kafkaTemplate() {
-        return new KafkaTemplate<>(producerFactory());
+    public ProducerFactory<String, Incident> incidentProducerFactory() {
+        return new DefaultKafkaProducerFactory<>(producerConfig());
+    }
+
+    @Bean
+    public KafkaTemplate<String, Incident> incidentKafkaTemplate() {
+        return new KafkaTemplate<>(incidentProducerFactory());
+    }
+
+    @Bean
+    public ProducerFactory<String, RemediationDecision> remediationProducerFactory() {
+        return new DefaultKafkaProducerFactory<>(producerConfig());
+    }
+
+    @Bean
+    public KafkaTemplate<String, RemediationDecision> remediationKafkaTemplate() {
+        return new KafkaTemplate<>(remediationProducerFactory());
     }
 }

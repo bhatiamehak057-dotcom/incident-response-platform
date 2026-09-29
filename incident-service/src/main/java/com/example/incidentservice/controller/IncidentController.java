@@ -12,6 +12,7 @@ public class IncidentController {
 
     private final IncidentService incidentService;
 
+
     public IncidentController(IncidentService incidentService) {
         this.incidentService = incidentService;
     }
@@ -25,4 +26,5 @@ public class IncidentController {
     public Incident createIncident(@RequestBody Incident incident) {
         return incidentService.createIncident(incident);
     }
+
 }

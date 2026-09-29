@@ -6,7 +6,8 @@ import asyncio
 
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict
-from mcp import Client, StdioServerParameters
+from mcp import Client
+# from mcp import StdioServerParameters
 from rag import initialize_rag, retrieve_runbook
 
 # importing anthropic sdk, This gives our Python application access to Anthropic's API.
@@ -29,19 +30,21 @@ class IncidentState(TypedDict):
     investigation: dict
     runbooks: list
     final_analysis: dict
+    remediation: dict
 
 # creates an Anthropic client.
 # Think of client as our connection/interface to Claude.
 # The Anthropic object gives your Python code methods for communicating with Claude
 client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-server_params = StdioServerParameters(
-    command="/Users/mehakbhatia/IdeaProjects/incident-response-platform/mcp-server/.venv/bin/mcp",
-    args=[
-        "run",
-        "/Users/mehakbhatia/IdeaProjects/incident-response-platform/mcp-server/server.py"
-    ],
-)
+# We don't need below code anymore because the MCP server is already running independently on port 8001.
+# server_params = StdioServerParameters(
+#     command="/Users/mehakbhatia/IdeaProjects/incident-response-platform/mcp-server/.venv/bin/mcp",
+#     args=[
+#         "run",
+#         "/Users/mehakbhatia/IdeaProjects/incident-response-platform/mcp-server/server.py"
+#     ],
+# )
 
 # This is a LangGraph node. - It's just a Python function.
 # The node:
@@ -110,12 +113,17 @@ Return your analysis as JSON with exactly these fields:
         "analysis": analysis
     }
 
-
+# LangGraph passes the state to MCP investigation node.
+# This node calls three MCP tools
 def investigate_incident(state: IncidentState):
     incident = state["incident"]
 
+    # async def call_mcp():
+    #     async with Client(server_params) as client:
+
+    # This is an important improvement because the MCP server is now an independent service, rather than something the AI agent owns as a subprocess.
     async def call_mcp():
-        async with Client(server_params) as client:
+        async with Client("http://localhost:8001/mcp") as client:
 
             health_result = await client.call_tool(
                 "get_service_health",
@@ -157,6 +165,7 @@ def investigate_incident(state: IncidentState):
 
 
 # Its job is to connect LangGraph → RAG.
+# giving Claude access to existing operational knowledge
 def retrieve_incident_runbook(state: IncidentState):
 
     incident = state["incident"]
@@ -184,7 +193,7 @@ def retrieve_incident_runbook(state: IncidentState):
         "runbooks": runbooks
     }
 
-
+# This is the second Claude call, and this is the response you should consider your evidence-based diagnosis
 def analyze_evidence(state: IncidentState):
     incident = state["incident"]
     investigation = state["investigation"]
@@ -249,6 +258,77 @@ Return your analysis as JSON with exactly these fields:
     }
 
 
+# look at:
+# final_analysis
+# and determine whether a remediation action should be proposed.
+# Node where Claude decides whether automation is appropriate, eg:
+# Given the evidence, should we propose restarting the service
+def decide_remediation(state: IncidentState):
+
+    incident = state["incident"]
+    final_analysis = state["final_analysis"]
+
+    prompt = f"""
+Based on the following production incident and evidence-based analysis,
+determine whether a remediation action should be proposed.
+
+Incident:
+{json.dumps(incident, indent=2)}
+
+Evidence-based analysis:
+{json.dumps(final_analysis, indent=2)}
+
+Available remediation actions:
+
+1. restart_service
+   - Restarts the affected service.
+   - This is currently a simulated remediation.
+
+Only propose a remediation if it is appropriate based on the evidence.
+
+Return JSON with exactly these fields:
+
+{{
+  "action": "restart_service" or "none",
+  "service": "string",
+  "reason": "string",
+  "requiresApproval": true or false
+}}
+
+Set requiresApproval to:
+- true if action is "restart_service"
+- false if action is "none"
+
+Do not execute any remediation.
+Only propose the action.
+"""
+
+    # if claude returns action as none, it means, Don't execute any of the currently available automated remediation actions.
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        messages=[
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    remediation_text = (
+        response.content[0].text
+        .replace("```json", "")
+        .replace("```", "")
+        .strip()
+    )
+
+    remediation = json.loads(remediation_text)
+
+    print("Remediation proposal:", remediation)
+
+    return {
+        "remediation": remediation
+    }
+
+# will only execute after human approval
+
 initialize_rag()
 # Create a graph whose state follows IncidentState
 graph_builder = StateGraph(IncidentState)
@@ -257,12 +337,14 @@ graph_builder.add_node("analyze", analyze_incident)
 graph_builder.add_node("investigate", investigate_incident)
 graph_builder.add_node("retrieve_runbook", retrieve_incident_runbook)
 graph_builder.add_node("analyze_evidence", analyze_evidence)
+graph_builder.add_node("decide_remediation", decide_remediation)
 
 graph_builder.add_edge(START, "analyze")
 graph_builder.add_edge("analyze", "investigate")
 graph_builder.add_edge("investigate", "retrieve_runbook")
 graph_builder.add_edge("retrieve_runbook", "analyze_evidence")
-graph_builder.add_edge("analyze_evidence", END)
+graph_builder.add_edge("analyze_evidence", "decide_remediation")
+graph_builder.add_edge("decide_remediation", END)
 
 # turns the graph definition into an executable graph
 graph = graph_builder.compile()
@@ -279,10 +361,54 @@ if __name__ == "__main__":
         "analysis": {},
         "investigation": {},
         "runbooks":[],
-        "final_analysis": {}
+        "final_analysis": {},
+        "remediation": {}
     })
 
-    print(result)
+    # print(result)
+
+    analysis = result["analysis"]
+final_analysis = result["final_analysis"]
+investigation = result["investigation"]
+remediation = result["remediation"]
+
+print("\n=== INCIDENT ===")
+print(result["incident"])
+
+print("\n=== INITIAL ANALYSIS ===")
+print("Root cause:", analysis["rootCause"])
+print("Impact:", analysis["impact"])
+print("Recommended actions:")
+for action in analysis["recommendedActions"]:
+    print(f"- {action}")
+
+print("\n=== INVESTIGATION ===")
+print("Health:", investigation["health"])
+print("Logs:", investigation["logs"])
+print("Metrics:", investigation["metrics"])
+
+print("\n=== RUNBOOKS ===")
+for runbook in result["runbooks"]:
+    print(runbook.split("\n")[0])
+
+print("\n=== EVIDENCE-BASED ANALYSIS ===")
+print("Root cause:", final_analysis["rootCause"])
+print("Impact:", final_analysis["impact"])
+print("Recommended actions:")
+for action in final_analysis["recommendedActions"]:
+    print(f"- {action}")
+
+print("\n=== REMEDIATION DECISION ===")
+print("Action:", remediation["action"])
+print("Service:", remediation["service"])
+print("Reason:", remediation["reason"])
+print("Requires approval:", remediation["requiresApproval"])
+
+# analysis = Claude's initial hypothesis;
+# investigation = MCP's observed system data;
+# runbooks = Chroma/RAG's retrieved knowledge;
+# final_analysis = Claude's evidence-based diagnosis;
+# remediation = Claude's decision about whether an available automated action should be proposed.
 
 # Runbook = human-written operational knowledge/instructions.
 # Chroma = stores and searches that knowledge semantically.
@@ -337,3 +463,56 @@ if __name__ == "__main__":
 #                    │
 #                    ▼
 #           Refined diagnosis
+
+
+
+
+
+# START
+#   ↓
+# Initial Claude Analysis
+#   ↓
+# MCP Investigation
+#   ↓
+# RAG Retrieval
+#   ↓
+# Evidence-Based Claude Analysis
+#   ↓
+# Remediation Decision
+#   ↓
+# END
+
+
+
+
+#                  LangGraph
+#                     │
+#                     ▼
+#             decide_remediation
+#                     │
+#              action = restart
+#                     │
+#              requiresApproval
+#                     │
+#                     ▼
+#               SAVE / PAUSE
+#                     │
+#                     │
+#                     ▼
+#               React Dashboard
+#                     │
+#              ┌──────┴──────┐
+#              ▼             ▼
+#           Approve        Reject
+#              │             │
+#              └──────┬──────┘
+#                     ▼
+#                   Kafka
+#                     │
+#                     ▼
+#               Resume workflow
+#                     │
+#               ┌─────┴─────┐
+#               ▼           ▼
+#            execute       END
+#            MCP

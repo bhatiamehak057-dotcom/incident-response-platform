@@ -48,3 +48,37 @@ def get_metrics(service: str) -> dict:
         "latencyMs": 4200,
         "requestsPerMinute": 120
     }
+
+# We're deliberately simulating the restart. The portfolio project shouldn't actually restart a machine/container.
+@mcp.tool()
+def restart_service(service: str) -> dict:
+    """Simulate restarting a service."""
+    return {
+        "service": service,
+        "action": "restart",
+        "status": "simulated",
+        "message": f"Simulated restart of {service}"
+    }
+
+if __name__ == "__main__":
+    mcp.run(
+        transport="streamable-http",
+        host="127.0.0.1",
+        port=8001
+    )
+
+
+    #                  MCP Server
+    #                      │
+    #           ┌──────────┴──────────┐
+    #           │                     │
+    #        AI Agent           Remediation Executor
+    #           │                     │
+    #    health/logs/metrics      restart_service
+
+
+    # HTTP over stdio isn't about Python vs. Java.
+    #
+    # It's about:
+    # Do we want MCP to be an independently running service that multiple clients can connect to?
+    # For our architecture, yes.
